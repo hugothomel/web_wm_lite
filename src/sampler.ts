@@ -130,6 +130,13 @@ export class DiffusionSampler {
     }
 
     const out = await denoiser.run(feeds)
-    return out['denoised'].data as Float32Array
+    const data = out['denoised'].data as Float32Array
+
+    // CRITICAL: Dispose all tensors to free GPU memory
+    // Without this, GPU memory leaks ~6 tensors/frame → crash in ~20s
+    for (const t of Object.values(feeds)) t.dispose()
+    for (const t of Object.values(out)) t.dispose()
+
+    return data
   }
 }

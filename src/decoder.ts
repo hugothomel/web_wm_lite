@@ -100,7 +100,13 @@ export class Decoder {
     }
 
     const out = await this.session.run(feeds)
-    return out['rgb'].data as Float32Array
+    const data = out['rgb'].data as Float32Array
+
+    // CRITICAL: Dispose tensors to free GPU memory
+    for (const t of Object.values(feeds)) t.dispose()
+    for (const t of Object.values(out)) t.dispose()
+
+    return data
   }
 
   getOutputDimensions(): { c: number; h: number; w: number } {
