@@ -1,5 +1,5 @@
-// Diffusion sampler — ported from web_wm_onnx/src/wm_sampler/diffusionSampler.ts
-// Same logic, same buffer reuse pattern
+// Diffusion sampler — ported from web_wm_onnx
+// Fixed: pre-allocated denoise output buffer, proper tensor disposal
 
 import type * as OrtType from 'onnxruntime-web'
 
@@ -26,10 +26,11 @@ export class DiffusionSampler {
 
   // Pre-computed sigmas
   private sigmas: Float32Array
-  // Reusable buffers
+  // Reusable buffers — allocated once, reused every frame
   private xBuf: Float32Array | null = null
   private dBuf: Float32Array | null = null
   private resultBuf: Float32Array | null = null
+  private denoiseBuf: Float32Array | null = null  // For copying output before dispose
   private sigmaBuf = new Float32Array(1)
   private sigmaCondBuf = new Float32Array(1)
   private actBuf: BigInt64Array | null = null
@@ -65,11 +66,12 @@ export class DiffusionSampler {
   ): Promise<Float32Array> {
     const frameSize = C * H * W
 
-    // Reuse or create buffers
+    // Allocate all buffers once
     if (!this.xBuf || this.xBuf.length !== frameSize) {
       this.xBuf = new Float32Array(frameSize)
       this.dBuf = new Float32Array(frameSize)
       this.resultBuf = new Float32Array(frameSize)
+      this.denoiseBuf = new Float32Array(frameSize)
     }
     if (!this.actBuf || this.actBuf.length !== T) {
       this.actBuf = new BigInt64Array(T)
@@ -79,8 +81,7 @@ export class DiffusionSampler {
     const last = prevObsTC.subarray((T - 1) * frameSize, T * frameSize)
     const x = this.xBuf
     const d = this.dBuf!
-    const initialSigma = this.sigmas[0]
-    const noiseScale = this.numSteps === 1 ? initialSigma : 0.05
+    const noiseScale = this.numSteps === 1 ? this.sigmas[0] : 0.05
     for (let i = 0; i < frameSize; i++) {
       const u1 = Math.random()
       const u2 = Math.random()
@@ -92,7 +93,9 @@ export class DiffusionSampler {
     for (let i = 0; i < sigmas.length - 1; i++) {
       const sigma = sigmas[i]
       const nextSigma = sigmas[i + 1]
-      const den = await this.denoise(denoiser, x, sigma, prevObsTC, C, H, W, T)
+      await this.denoise(denoiser, x, sigma, prevObsTC, C, H, W, T)
+      // denoiseBuf now holds the denoised output
+      const den = this.denoiseBuf!
       for (let j = 0; j < frameSize; j++) d[j] = (x[j] - den[j]) / sigma
       const dt = nextSigma - sigma
       for (let j = 0; j < frameSize; j++) x[j] = x[j] + d[j] * dt
@@ -107,21 +110,27 @@ export class DiffusionSampler {
     return this.resultBuf!
   }
 
+  // Writes denoised output into this.denoiseBuf (no allocation, no returned reference to ORT memory)
   private async denoise(
     denoiser: OrtType.InferenceSession,
     noisyNext: Float32Array,
     sigma: number,
     prevObsTC: Float32Array,
     C: number, H: number, W: number, T: number
-  ): Promise<Float32Array> {
+  ): Promise<void> {
     this.sigmaBuf[0] = sigma
 
     const ort = this.ort
+    const noisyTensor = new ort.Tensor('float32', noisyNext, [1, C, H, W])
+    const sigmaTensor = new ort.Tensor('float32', this.sigmaBuf, [1])
+    const obsTensor = new ort.Tensor('float32', prevObsTC, [1, T * C, H, W])
+    const actTensor = new ort.Tensor('int64', this.actBuf!, [1, T])
+
     const feeds: Record<string, OrtType.Tensor> = {
-      noisy_next_obs: new ort.Tensor('float32', noisyNext, [1, C, H, W]),
-      sigma: new ort.Tensor('float32', this.sigmaBuf, [1]),
-      [this.inputNames.obs]: new ort.Tensor('float32', prevObsTC, [1, T * C, H, W]),
-      [this.inputNames.act]: new ort.Tensor('int64', this.actBuf!, [1, T])
+      noisy_next_obs: noisyTensor,
+      sigma: sigmaTensor,
+      [this.inputNames.obs]: obsTensor,
+      [this.inputNames.act]: actTensor,
     }
 
     if (this.inputNames.hasSigmaCond) {
@@ -130,13 +139,16 @@ export class DiffusionSampler {
     }
 
     const out = await denoiser.run(feeds)
-    const data = out['denoised'].data as Float32Array
 
-    // CRITICAL: Dispose all tensors to free GPU memory
-    // Without this, GPU memory leaks ~6 tensors/frame → crash in ~20s
-    for (const t of Object.values(feeds)) t.dispose()
-    for (const t of Object.values(out)) t.dispose()
+    // COPY output data into our pre-allocated buffer BEFORE disposing
+    const outData = out['denoised'].data as Float32Array
+    this.denoiseBuf!.set(outData)
 
-    return data
+    // Now safe to dispose output tensors (frees GPU/WASM memory)
+    for (const t of Object.values(out)) {
+      if (t.dispose) t.dispose()
+    }
+    // Note: Do NOT dispose feed tensors — they wrap our reusable buffers
+    // (sigmaBuf, actBuf, etc). Disposing could detach the ArrayBuffers.
   }
 }

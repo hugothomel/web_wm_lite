@@ -1,4 +1,4 @@
-// Decoder — ported from web_wm_onnx with pre-allocated rescale buffer + session.release()
+// Decoder — pre-allocated buffers, copy-before-dispose, proper session lifecycle
 
 import type * as OrtType from 'onnxruntime-web'
 import { getOrt, needsWasmOnly, checkWebGPU } from './ort'
@@ -13,8 +13,9 @@ export class Decoder {
   private outputW: number
   private outputC: number
   private latentScale: LatentScale | null
-  // Pre-allocated rescale buffer (avoids per-frame allocation)
+  // Pre-allocated buffers — zero per-frame allocation
   private rescaleBuf: Float32Array | null = null
+  private rgbBuf: Float32Array | null = null
   private decodeCount = 0
 
   static async create(
@@ -59,7 +60,10 @@ export class Decoder {
 
     console.log(`[Decoder] inputs: ${session.inputNames.join(', ')}, outputs: ${session.outputNames.join(', ')}`)
 
-    return new Decoder(ort, session, outputH, outputW, outputC, latentChannels, latentScale || null)
+    const dec = new Decoder(ort, session, outputH, outputW, outputC, latentChannels, latentScale || null)
+    // Pre-allocate RGB output buffer
+    dec.rgbBuf = new Float32Array(outputC * outputH * outputW)
+    return dec
   }
 
   private constructor(
@@ -84,7 +88,6 @@ export class Decoder {
     let latentForDecoder = latent
     if (this.latentScale) {
       const { min, max } = this.latentScale
-      // Pre-allocate or reuse rescale buffer
       if (!this.rescaleBuf || this.rescaleBuf.length !== latent.length) {
         this.rescaleBuf = new Float32Array(latent.length)
       }
@@ -95,18 +98,25 @@ export class Decoder {
       latentForDecoder = buf
     }
 
-    const feeds: Record<string, OrtType.Tensor> = {
-      'latent': new ort.Tensor('float32', latentForDecoder, [1, this.latentChannels, h, w])
-    }
+    const inputTensor = new ort.Tensor('float32', latentForDecoder, [1, this.latentChannels, h, w])
+    const feeds: Record<string, OrtType.Tensor> = { 'latent': inputTensor }
 
     const out = await this.session.run(feeds)
-    const data = out['rgb'].data as Float32Array
 
-    // CRITICAL: Dispose tensors to free GPU memory
-    for (const t of Object.values(feeds)) t.dispose()
-    for (const t of Object.values(out)) t.dispose()
+    // COPY output into pre-allocated buffer BEFORE disposing
+    const outData = out['rgb'].data as Float32Array
+    if (!this.rgbBuf || this.rgbBuf.length !== outData.length) {
+      this.rgbBuf = new Float32Array(outData.length)
+    }
+    this.rgbBuf.set(outData)
 
-    return data
+    // Dispose output tensors to free GPU/WASM memory
+    for (const t of Object.values(out)) {
+      if (t.dispose) t.dispose()
+    }
+    // Do NOT dispose feed tensor — it wraps our rescaleBuf/latent buffer
+
+    return this.rgbBuf
   }
 
   getOutputDimensions(): { c: number; h: number; w: number } {
@@ -124,9 +134,9 @@ export class Decoder {
     return rgb
   }
 
-  // KEY FIX: Release the ONNX session
   async destroy() {
     await this.session.release()
     this.rescaleBuf = null
+    this.rgbBuf = null
   }
 }
