@@ -1,0 +1,19 @@
+{
+  "name": "web_wm_lite",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "copy-wasm": "bash scripts/copy-wasm.sh"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.23.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.8",
+    "typescript": "^5.6.2"
+  }
+}
