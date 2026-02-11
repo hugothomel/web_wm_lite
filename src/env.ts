@@ -15,9 +15,6 @@ export class WorldModelEnv {
   private actBuf: Int32Array
   private currentAction = 0
   private config: ModelConfig
-  // Reusable step buffers
-  private prevObsBuf: Float32Array | null = null
-  private prevActBuf: Int32Array | null = null
   private C: number
   private H: number
   private W: number
@@ -162,24 +159,13 @@ export class WorldModelEnv {
   async step() {
     this.actBuf[this.T - 1] = this.currentAction
 
-    const obsSize = this.T * this.C * this.H * this.W
-    if (!this.prevObsBuf || this.prevObsBuf.length !== obsSize) {
-      this.prevObsBuf = new Float32Array(obsSize)
-    }
-    if (!this.prevActBuf || this.prevActBuf.length !== this.T) {
-      this.prevActBuf = new Int32Array(this.T)
-    }
-    this.prevObsBuf.set(this.obsBuf)
-    this.prevActBuf.set(this.actBuf)
-
-    const next = await this.sampler.sample(this.denoiser, this.prevObsBuf, this.prevActBuf, this.C, this.H, this.W, this.T)
+    // Pass buffers directly — sampler only reads them, and rollBuffers runs after sample completes
+    const next = await this.sampler.sample(this.denoiser, this.obsBuf, this.actBuf, this.C, this.H, this.W, this.T)
     this.rollBuffers(next, this.currentAction)
   }
 
   // KEY FIX: Actually release the ONNX session
   async destroy() {
     await this.denoiser.release()
-    this.prevObsBuf = null
-    this.prevActBuf = null
   }
 }

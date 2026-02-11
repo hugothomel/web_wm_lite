@@ -114,7 +114,10 @@ export class Decoder {
     for (const t of Object.values(out)) {
       if (t.dispose) t.dispose()
     }
-    // Do NOT dispose feed tensor — it wraps our rescaleBuf/latent buffer
+    // Dispose feed tensors to free GPU-side buffer copies
+    for (const t of Object.values(feeds)) {
+      if (t.dispose) t.dispose()
+    }
 
     return this.rgbBuf
   }

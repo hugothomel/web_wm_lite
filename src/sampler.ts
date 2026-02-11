@@ -148,7 +148,10 @@ export class DiffusionSampler {
     for (const t of Object.values(out)) {
       if (t.dispose) t.dispose()
     }
-    // Note: Do NOT dispose feed tensors — they wrap our reusable buffers
-    // (sigmaBuf, actBuf, etc). Disposing could detach the ArrayBuffers.
+    // Dispose feed tensors to free GPU-side buffer copies
+    // (CPU-side pool buffers are unaffected — dispose only releases the ORT wrapper)
+    for (const t of Object.values(feeds)) {
+      if (t.dispose) t.dispose()
+    }
   }
 }
